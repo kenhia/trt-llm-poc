@@ -408,53 +408,125 @@ exit
 ## §4 — Track B: Triton Model Repository Setup
 
 Track B uses the Triton Inference Server container (`tritonserver:25.05-trtllm-python-py3`)
-to serve built engines via an OpenAI-compatible HTTP endpoint. Before starting Triton,
-the model repository must be populated with `config.pbtxt` files that tell Triton which
-engines to load and under which names.
+to serve built engines via an OpenAI-compatible HTTP endpoint on port 9000.
+
+> **Critical version constraint**: The Triton 25.05 image bundles TRT-LLM **0.19.0**, not
+> the 1.3.0rc13 in the Track A dev container. Engines built in the dev container (Track A)
+> are **incompatible** with Triton 25.05 and will fail to deserialize at load time. All
+> engines intended for Triton must be built **inside the Triton container**.
+
+> **Multi-model pipeline**: Triton 25.05 requires the full `inflight_batcher_llm` five-model
+> pipeline layout (`preprocessing`, `tensorrt_llm`, `postprocessing`, `ensemble`,
+> `tensorrt_llm_bls`). A single `config.pbtxt` is not sufficient. Use the templates bundled
+> in the container and `fill_template.py` to generate the correct model repository.
 
 ### §4.1 Install the Compose File
 
 ```bash
-# From repo root (on the host, not inside the container):
+# From repo root (on the host, not inside any container):
 just compose-install
 ```
 
 This copies `compose.yaml` to `$TRTLLM_HOME/compose.yaml`. The `compose-up` recipe
 reads it from there.
 
-### §4.2 Populate the Triton Model Repository
+### §4.2 Build the Engine Inside the Triton Container
 
-The repo contains `config.pbtxt` templates in `triton-model-repo/`. Copy the model(s)
-you have built engines for into `$TRTLLM_HOME/model_repo/`:
+The engine must be built inside the Triton 25.05 container so it targets TRT-LLM 0.19.0.
 
 ```bash
-# Copy template(s) for the engine(s) you have built:
-cp -r triton-model-repo/qwen-coder $TRTLLM_HOME/model_repo/
-# cp -r triton-model-repo/llama3-chat $TRTLLM_HOME/model_repo/   # once Llama engine built
-# cp -r triton-model-repo/llava-caption $TRTLLM_HOME/model_repo/ # once LLaVA engine built
+# 1. Start an interactive Triton container (Track B image, not the dev container):
+docker run -it --rm --gpus all --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 \
+  -v $TRTLLM_HOME:/workspace/trtllm \
+  nvcr.io/nvidia/tritonserver:25.05-trtllm-python-py3 \
+  bash
+
+# 2. Inside the container — convert HF weights to TRT-LLM checkpoint format:
+#    (Qwen2.5-Coder-7B shown; adjust paths for other models)
+python3 /opt/tritonserver/backends/tensorrtllm/examples/qwen/convert_checkpoint.py \
+  --model_dir /workspace/trtllm/models/qwen-coder-7b \
+  --output_dir /workspace/trtllm/models/qwen-coder-7b-ckpt-0.19 \
+  --dtype float16
+
+# 3. Build the TRT-LLM engine:
+trtllm-build \
+  --checkpoint_dir /workspace/trtllm/models/qwen-coder-7b-ckpt-0.19 \
+  --output_dir /workspace/trtllm/engines/qwen-coder \
+  --gemm_plugin float16 \
+  --max_batch_size 1 \
+  --max_input_len 2048 \
+  --max_seq_len 3072
+
+# 4. Exit the container (engines persist on the host via the volume mount):
+exit
 ```
 
-**Why a separate model_repo directory**: Triton watches this directory at startup. Only
-models with a valid `config.pbtxt` and a corresponding engine are loaded. Engines missing
-their config are silently ignored; configs pointing to missing engines cause Triton to fail
-to start. Keep the model_repo in sync with what's actually built.
-
-### §4.3 Verify the config.pbtxt
-
-Each `config.pbtxt` in `model_repo/<model_name>/` must have:
-- `name` matching the directory name exactly
-- `engine_dir` pointing to the built engine directory (inside the container path)
-- `tokenizer_dir` pointing to the HuggingFace model directory (inside the container path)
-
-Container-side paths use `/workspace/trtllm/` as the root (which maps to `$TRTLLM_HOME`
-on the host via the compose volume mount).
-
-**Example** — verify the qwen-coder config is correct before starting:
+**If the engine directory is owned by root** (because it was written by root inside the
+container), fix permissions on the host:
 ```bash
-cat $TRTLLM_HOME/model_repo/qwen-coder/config.pbtxt
-# Confirm engine_dir = /workspace/trtllm/engines/qwen-coder
-# Confirm tokenizer_dir = /workspace/trtllm/models/qwen-coder-7b
+sudo chown -R $USER:$USER $TRTLLM_HOME/engines/
 ```
+
+### §4.3 Set Up the Triton Model Repository (inflight_batcher_llm)
+
+Triton 25.05 requires the full five-model pipeline. Generate it from the container's
+bundled templates using `fill_template.py`:
+
+```bash
+# 1. Copy the pipeline templates out of the container image:
+docker run --rm \
+  nvcr.io/nvidia/tritonserver:25.05-trtllm-python-py3 \
+  bash -c "tar -cf - /opt/tritonserver/backends/tensorrtllm/inflight_batcher_llm" \
+  | tar -xf - --strip-components=6 -C $TRTLLM_HOME/model_repo
+
+# 2. Run fill_template.py inside the container to substitute engine/tokenizer paths:
+docker run --rm \
+  -v $TRTLLM_HOME:/workspace/trtllm \
+  nvcr.io/nvidia/tritonserver:25.05-trtllm-python-py3 \
+  bash -c "
+    cd /workspace/trtllm/model_repo/tensorrt_llm
+    python3 /opt/tritonserver/backends/tensorrtllm/tools/fill_template.py \
+      --in_place config.pbtxt \
+      decoupled_mode:False,\
+      engine_dir:/workspace/trtllm/engines/qwen-coder,\
+      max_tokens_in_paged_kv_cache:2560,\
+      batch_scheduler_policy:guaranteed_no_evict,\
+      kv_cache_free_gpu_mem_fraction:0.9,\
+      max_num_sequences:1,\
+      executor_worker_path:/opt/tritonserver/backends/tensorrtllm/trtllmExecutorWorker
+  "
+
+# 3. Create the required version subdirectory for each model:
+for model in preprocessing tensorrt_llm postprocessing ensemble tensorrt_llm_bls; do
+  mkdir -p $TRTLLM_HOME/model_repo/$model/1
+done
+```
+
+**Why five models**: The pipeline separates concerns — `preprocessing` tokenizes input,
+`tensorrt_llm` runs the engine, `postprocessing` detokenizes output, `ensemble` chains
+them, and `tensorrt_llm_bls` provides the Business Logic Script entry point for the
+OpenAI frontend.
+
+### §4.4 Verify the Model Repository
+
+```bash
+ls $TRTLLM_HOME/model_repo/
+# Expected: ensemble/  postprocessing/  preprocessing/  tensorrt_llm/  tensorrt_llm_bls/
+
+# Each model dir must have a version subdirectory:
+ls $TRTLLM_HOME/model_repo/tensorrt_llm/
+# Expected: 1/  config.pbtxt
+
+# Confirm engine path is correct in the tensorrt_llm config:
+grep gpt_model_path $TRTLLM_HOME/model_repo/tensorrt_llm/config.pbtxt
+# Expected: string_value: "/workspace/trtllm/engines/qwen-coder"
+```
+
+**Verify §4 complete**:
+- [ ] Engine built inside Triton 25.05 container and owned by non-root user
+- [ ] `$TRTLLM_HOME/model_repo/` has all five pipeline model directories
+- [ ] Each model directory has a `1/` version subdirectory
+- [ ] `grep gpt_model_path` shows the correct engine path
 
 ---
 
@@ -469,6 +541,16 @@ just compose-up
 This runs `docker compose up -d` from `$TRTLLM_HOME`. The container starts detached with
 `restart: unless-stopped` — it will come back automatically after a host reboot (SC-003).
 
+The container runs `scripts/start-triton.sh`, which execs `python3 openai_frontend/main.py`.
+`main.py` starts an **embedded Triton** (via Python bindings), loads the model repository,
+and starts Uvicorn on port 9000. There is no separate `tritonserver` process — they are
+combined.
+
+> **Why embedded Triton**: the Triton 25.05 Python API (`tritonserver` bindings) embeds the
+> Triton runtime directly in the Python process. Starting a standalone `tritonserver` binary
+> alongside `main.py` causes GPU resource contention and `Failed to deserialize cuda engine`
+> failures. Always use `main.py` alone as the entrypoint.
+
 ### §5.2 Watch Startup Logs
 
 ```bash
@@ -477,61 +559,67 @@ just compose-logs
 
 Watch for these key messages in order:
 
-1. `Loading model...` — Triton is loading the TRT-LLM engine
-2. `Loaded engine size: XXXX MiB` — engine loaded into GPU memory
-3. `Started GRPCInferenceService` — gRPC endpoint ready
-4. `Started HTTPService` — HTTP endpoint ready on port 8000
-5. `All models are ready` — model repository fully loaded
+1. `[start-triton] Starting OpenAI frontend` — startup script running
+2. `Loading model...` — embedded Triton is loading the TRT-LLM engine
+3. `Loaded engine size: XXXX MiB` — engine loaded into GPU memory
+4. `All models are ready` — all five pipeline models ready
+5. `Uvicorn running on http://0.0.0.0:9000` — OpenAI frontend accepting requests
 
-Full startup typically takes 10–30 seconds after the engine is loaded. Press `Ctrl-C` to
-stop following logs; the container continues running.
+Full startup typically takes 20–60 seconds. Press `Ctrl-C` to stop following logs; the
+container continues running.
 
 **If Triton exits immediately**: run `just compose-logs` to see the error. Common causes:
 - Missing or invalid `config.pbtxt` (name mismatch, bad path)
 - Engine directory doesn't exist or is empty
+- `Failed to deserialize cuda engine` — engine was built with wrong TRT-LLM version
+  (see §4.2 — engine must be built inside the Triton container)
 - Insufficient VRAM (another process holding GPU memory)
 
 See [docs/setup.md §6](#6--troubleshooting) for more.
 
-### §5.3 Health Check — Model List (SC-002 prerequisite)
+### §5.3 Health Check — Triton Native API
 
 ```bash
-curl http://localhost:8000/v1/models
+# Triton native readiness (should return HTTP 200):
+curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8000/v2/health/ready
+
+# List loaded models via native v2 API:
+curl -s -X POST http://localhost:8000/v2/repository/index | python -m json.tool
+# Expected: all five pipeline models listed with state READY
 ```
 
-Expected response (model names will vary based on which configs are loaded):
-```json
-{"object":"list","data":[{"id":"qwen-coder","object":"model","created":0,"owned_by":""}]}
-```
-
-If you get `Connection refused`: Triton is not yet running — check `just ps` and
-`just compose-logs`.
-
-If you get a response but no models: `config.pbtxt` was read but the engine failed to
-load — look for errors in `just compose-logs`.
-
-### §5.4 Inference Smoke Test via curl
-
-Confirm the serving endpoint produces a response before running the Rust client:
+### §5.4 Health Check — OpenAI-Compatible API (SC-002 prerequisite)
 
 ```bash
-curl -s http://localhost:8000/v1/chat/completions \
+# List models via OpenAI API (port 9000):
+curl -s http://localhost:9000/v1/models | python -m json.tool
+# Expected: {"object":"list","data":[{"id":"ensemble",...},{"id":"tensorrt_llm_bls",...},...]}
+```
+
+### §5.5 Inference Smoke Test via curl
+
+```bash
+curl -s http://localhost:9000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "qwen-coder",
+    "model": "ensemble",
     "messages": [{"role": "user", "content": "Write a one-line Python hello world."}],
-    "max_tokens": 64,
-    "temperature": 0.7
+    "max_tokens": 64
   }' | python -m json.tool
 ```
 
 Expected: a JSON response with `choices[0].message.content` containing Python code.
 
+> **Model name**: Use `"ensemble"` (or `"tensorrt_llm_bls"`) in all requests — these are
+> the pipeline entry-point model names that Triton has loaded. Individual component models
+> (`preprocessing`, `tensorrt_llm`, `postprocessing`) are not valid inference targets.
+
 **Verify §5 complete**:
 - [ ] `just compose-up` started the container without error
-- [ ] `just compose-logs` showed `All models are ready`  
-- [ ] `curl /v1/models` returned the model list (SC-002 prerequisite met)
-- [ ] `curl /v1/chat/completions` returned a coherent code response
+- [ ] `just compose-logs` showed `All models are ready` then `Uvicorn running on ... 9000`
+- [ ] `curl localhost:8000/v2/health/ready` returned `200`
+- [ ] `curl localhost:9000/v1/models` returned model list (SC-002 prerequisite met)
+- [ ] `curl localhost:9000/v1/chat/completions` returned a coherent code response
 - [ ] Rebooted host and confirmed container restarted automatically (SC-003)
 
 ---

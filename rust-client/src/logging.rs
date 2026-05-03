@@ -21,12 +21,7 @@ pub fn log_request(response: &InferenceResponse, success: bool, error: Option<&s
 }
 
 /// Emit a structured tracing event for a failed inference request (no response available).
-pub fn log_request_error(
-    request_id: &str,
-    capability: Capability,
-    latency_ms: u64,
-    error: &str,
-) {
+pub fn log_request_error(request_id: &str, capability: Capability, latency_ms: u64, error: &str) {
     tracing::error!(
         request_id = %request_id,
         capability = %capability,

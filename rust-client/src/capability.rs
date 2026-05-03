@@ -4,21 +4,28 @@ use crate::models::InferenceRequest;
 /// Determines which Triton model and model_id are used for a request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Capability {
-    /// General conversational LLM → model_id "llama3-chat"
+    /// General conversational LLM → model_id "ensemble"
     Chat,
-    /// Coding-focused LLM → model_id "qwen-coder"
+    /// Coding-focused LLM → model_id "ensemble"
     Code,
-    /// Vision-language model for image description → model_id "llava-caption"
+    /// Vision-language model for image description → model_id "ensemble"
+    ///
+    /// NOTE: In this single-engine POC all three capabilities route to the
+    /// same `inflight_batcher_llm` pipeline ("ensemble").  When LLaVA is
+    /// added as a second engine, Caption should route to its own pipeline
+    /// entry-point model.
     Caption,
 }
 
 impl Capability {
     /// Returns the Triton model identifier for this capability.
+    /// With the `inflight_batcher_llm` multi-model pipeline the client-facing
+    /// entry point is always "ensemble" (or "tensorrt_llm_bls").
     pub fn model_id(&self) -> &'static str {
         match self {
-            Capability::Chat => "llama3-chat",
-            Capability::Code => "qwen-coder",
-            Capability::Caption => "llava-caption",
+            Capability::Chat => "ensemble",
+            Capability::Code => "ensemble",
+            Capability::Caption => "ensemble",
         }
     }
 }
@@ -41,10 +48,10 @@ pub fn resolve_capability(req: &InferenceRequest) -> Capability {
     if req.image.is_some() {
         return Capability::Caption;
     }
-    if let Some(hint) = &req.system_hint {
-        if hint.to_lowercase().contains("code") {
-            return Capability::Code;
-        }
+    if let Some(hint) = &req.system_hint
+        && hint.to_lowercase().contains("code")
+    {
+        return Capability::Code;
     }
     Capability::Chat
 }

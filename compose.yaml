@@ -26,6 +26,10 @@ services:
       # Tell NVIDIA which GPUs to expose; "all" = all available GPUs.
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      # start-triton.sh config — override these in $TRTLLM_HOME/.env if needed.
+      # OPENAI_TOKENIZER points at the HF model dir used for chat-template tokenization.
+      OPENAI_TOKENIZER: ${OPENAI_TOKENIZER:-/workspace/trtllm/models/qwen-coder-7b}
+      OPENAI_PORT: ${OPENAI_PORT:-9000}
 
     # shm_size: 2gb — shared memory for inter-process tensor transfers inside Triton.
     # Increase to 4gb or 8gb if you see "out of shared memory" errors under concurrency.
@@ -38,12 +42,14 @@ services:
       stack: 67108864
 
     ports:
-      # 8000: Triton HTTP endpoint — used by the Rust client (FR-004, FR-008).
+      # 8000: Triton native HTTP endpoint (v2 protocol, used internally by the OpenAI frontend).
       - "8000:8000"
       # 8001: Triton gRPC endpoint — not used by the Rust client in this POC, exposed for completeness.
       - "8001:8001"
       # 8002: Triton metrics endpoint (Prometheus-compatible).
       - "8002:8002"
+      # 9000: OpenAI-compatible frontend — /v1/chat/completions, /v1/models (FR-004, FR-008).
+      - "9000:9000"
 
     volumes:
       # Mount the entire TRTLLM_HOME so Triton can reach engines, models, and model_repo.
@@ -52,11 +58,12 @@ services:
       # which engines to load and how to expose them. See triton-model-repo/ in this repo
       # for templates; copy/symlink them into $TRTLLM_HOME/model_repo/ after engine build.
       - ${TRTLLM_HOME}/model_repo:/model_repo
+      # Mount the startup script from TRTLLM_HOME/scripts/ (installed by `just compose-install`).
+      - ${TRTLLM_HOME}/scripts/start-triton.sh:/start-triton.sh:ro
 
     working_dir: /workspace
 
-    # Start Triton server pointing at the model repository.
-    # model_repo/ must contain at least one valid config.pbtxt before starting.
-    # See triton-model-repo/ in the repo for templates; copy them with:
-    #   cp -r triton-model-repo/qwen-coder $TRTLLM_HOME/model_repo/
-    command: ["tritonserver", "--model-repository=/model_repo"]
+    # start-triton.sh: starts tritonserver, waits for /v2/health/ready, then launches
+    # the bundled OpenAI-compatible frontend on port 9000 (/v1/chat/completions).
+    # See scripts/start-triton.sh for details and OPENAI_TOKENIZER / OPENAI_PORT overrides.
+    command: ["/bin/bash", "/start-triton.sh"]

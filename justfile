@@ -31,11 +31,14 @@ init:
              {{TRTLLM_HOME}}/model_repo
     @echo "TRTLLM_HOME initialised at {{TRTLLM_HOME}}"
 
-# Install compose.yaml into TRTLLM_HOME so `docker compose` can find it there.
-# Re-run after any change to compose.yaml in the repo.
+# Install compose.yaml and scripts/ into TRTLLM_HOME so `docker compose` can find them.
+# Re-run after any change to compose.yaml or scripts/ in the repo.
 compose-install:
     cp compose.yaml {{TRTLLM_HOME}}/compose.yaml
-    @echo "compose.yaml installed to {{TRTLLM_HOME}}/compose.yaml"
+    mkdir -p {{TRTLLM_HOME}}/scripts
+    cp scripts/start-triton.sh {{TRTLLM_HOME}}/scripts/start-triton.sh
+    chmod +x {{TRTLLM_HOME}}/scripts/start-triton.sh
+    @echo "compose.yaml + scripts/ installed to {{TRTLLM_HOME}}"
 
 # --- Images ---
 # Pull both NGC images. This will take ~30 GB on first run.

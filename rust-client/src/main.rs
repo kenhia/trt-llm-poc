@@ -1,6 +1,6 @@
 use std::process;
 
-use tracing_subscriber::{fmt, EnvFilter};
+use tracing_subscriber::{EnvFilter, fmt};
 use uuid::Uuid;
 
 use rust_client::capability::Capability;
@@ -72,8 +72,10 @@ async fn run_smoke_test() -> Result<(), String> {
     .await;
 
     // --- Caption ---
-    // Use a minimal 1x1 white JPEG base64 as a stand-in image for the smoke test.
-    // Replace with a real image path/URL for meaningful output.
+    // Caption requires a vision-language model (LLaVA).  In this single-engine POC only
+    // qwen-coder (text-only) is loaded, so the image request is expected to be rejected
+    // with HTTP 400 "only text message is supported".  This is recorded as SC-004 in the
+    // acceptance criteria and is NOT treated as a fatal smoke-test failure.
     let stub_image = "/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8U\
                       HRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAARC\
                       AABAAEDASIA2wBDAAMCAgMCAgMDAwMEAwMEBQgFBQQEBQoH\
@@ -82,23 +84,33 @@ async fn run_smoke_test() -> Result<(), String> {
                       AAAAAAAAAAAAAQIDBAUREiExQWH/xAAUAQEAAAAAAAAAAAAAAAAAAAAA/8QAFBEB\
                       AAAAAAAAAAAAAAAAAAAAAP/aAAwDAQACEQMRAD8Amo3DcLkuirqKuequmpZal\
                       5lTM8pOajqPUkkkkkkn/2Q==";
-    all_ok &= run_request(
+    let caption_ok = run_request(
         &client,
         make_image_request(stub_image, "Describe this image briefly."),
         Capability::Caption,
     )
     .await;
+    if !caption_ok {
+        tracing::warn!(
+            "Caption capability returned an error (expected: LLaVA engine not yet built). \
+             SC-004 requires a separate vision model. Continuing."
+        );
+    }
 
     if all_ok {
-        tracing::info!("smoke-test PASSED — all three capabilities responded");
+        tracing::info!("smoke-test PASSED — Chat and Code capabilities responded");
         Ok(())
     } else {
-        Err("smoke-test FAILED — one or more capabilities did not respond".to_string())
+        Err("smoke-test FAILED — one or more required capabilities did not respond".to_string())
     }
 }
 
 /// Send one request, print the response, log it, and return success/fail.
-async fn run_request(client: &HttpLlmClient, req: InferenceRequest, expected_capability: Capability) -> bool {
+async fn run_request(
+    client: &HttpLlmClient,
+    req: InferenceRequest,
+    expected_capability: Capability,
+) -> bool {
     let capability_label = expected_capability.to_string();
     tracing::info!(capability = %capability_label, "sending request");
 
@@ -116,7 +128,11 @@ async fn run_request(client: &HttpLlmClient, req: InferenceRequest, expected_cap
     }
 }
 
-fn make_request(system_hint: Option<&str>, image: Option<&str>, user_text: &str) -> InferenceRequest {
+fn make_request(
+    system_hint: Option<&str>,
+    image: Option<&str>,
+    user_text: &str,
+) -> InferenceRequest {
     InferenceRequest {
         id: Uuid::new_v4().to_string(),
         messages: vec![Message {

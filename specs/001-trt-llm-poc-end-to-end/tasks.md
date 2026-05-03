@@ -139,6 +139,27 @@ changes; a fresh agent can replicate the environment using only these two files
 
 ---
 
+## Phase 8: OpenAI-Compatible Frontend
+
+**Purpose**: Expose the standard `/v1/chat/completions` endpoint so any OpenAI-compatible
+client (Rust crate, curl, Python openai SDK) can talk to Triton without knowing the native
+v2 protocol.
+
+**Background**: Triton 25.05 bundles a FastAPI OpenAI frontend at
+`/opt/tritonserver/python/openai/openai_frontend/main.py`. All dependencies
+(`tritonfrontend`, `tritonserver`, `fastapi`, `uvicorn`) are pre-installed in the image.
+The frontend listens on port 9000 and proxies to Triton's v2 HTTP on port 8000.
+
+- [X] T024 [US2] Create `scripts/start-triton.sh`: launches `tritonserver` in the background, polls `GET /v2/health/ready` until 200, then exec's `python3 /opt/tritonserver/python/openai/openai_frontend/main.py` with `--model-repository /model_repo` and `--tokenizer /workspace/trtllm/models/qwen-coder-7b`; update `compose.yaml` to use this script as the container command and expose port `9000:9000`
+- [X] T025 [P] [US3] Update `rust-client/src/client.rs` `HttpLlmClient` to POST to `/v1/chat/completions` on port 9000; update `.env.example` `TRTLLM_PORT` default to `9000`; update `probe_models()` to call `GET /v1/models`
+- [X] T026 [P] [US4] Update `docs/setup.md` §4 with the correct engine build procedure (build inside the Triton 25.05 container to match TRT-LLM 0.19.0) and the multi-model pipeline layout setup using `fill_template.py` from the container
+- [X] T027 Validate OpenAI-compat end-to-end: `just compose-up`, wait for ready, `curl /v1/chat/completions` with `"model": "ensemble"` returns a coherent response; `cargo run -- smoke-test` passes against the live endpoint
+
+**Checkpoint**: `curl http://localhost:9000/v1/chat/completions` returns a valid response;
+`cargo run -- smoke-test` exits 0; docs/setup.md §4 reflects the actual build procedure
+
+---
+
 ## Dependencies & Execution Order
 
 ### Phase Dependencies
@@ -219,7 +240,8 @@ US3 source files (T013–T018 in dependency order) → US4 + Polish
 | Phase 5: US3 | T013–T018 | 6 | T016 [P] with T014; T015 (TDD stub) before T014 |
 | Phase 6: US4 | T019–T020 | 2 | T020 parallel with T019 |
 | Phase 7: Polish | T021–T022 | 2 | T022 parallel with T021 |
-| **Total** | | **23** | |
+| Phase 8: OpenAI Frontend | T024–T027 | 4 | T025, T026 parallel with T024 |
+| **Total** | | **27** | |
 
 **Per user story**:
 
@@ -230,4 +252,4 @@ US3 source files (T013–T018 in dependency order) → US4 + Polish
 | US3 Rust Client | T013–T018 (6 tasks) | `cargo test` + `cargo run -- smoke-test` |
 | US4 Docs Handoff | T019–T020 (2 tasks) | Cold read of docs/setup.md + ansible-handoff.md |
 
-**Format validation**: All 23 tasks follow `- [ ] TXXX [P?] [Story?] Description with file path` ✅
+**Format validation**: All 27 tasks follow `- [ ] TXXX [P?] [Story?] Description with file path` ✅

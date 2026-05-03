@@ -2,10 +2,10 @@ use std::time::Instant;
 
 use reqwest::Client;
 
-use crate::capability::{resolve_capability, Capability};
+use crate::capability::{Capability, resolve_capability};
 use crate::models::{
     ChatCompletionRequest, ChatCompletionResponse, ContentPart, ImageUrl, InferenceRequest,
-    InferenceResponse, Message, MessageContent, ModelsResponse, MAX_TOKENS_DEFAULT,
+    InferenceResponse, MAX_TOKENS_DEFAULT, Message, MessageContent, ModelsResponse,
     TEMPERATURE_DEFAULT,
 };
 
@@ -31,10 +31,10 @@ impl HttpLlmClient {
     }
 
     /// Build base_url from TRTLLM_HOST / TRTLLM_PORT env vars.
-    /// Defaults: host = "localhost", port = "8000"
+    /// Defaults: host = "localhost", port = "9000" (OpenAI-compat frontend)
     pub fn from_env() -> Self {
         let host = std::env::var("TRTLLM_HOST").unwrap_or_else(|_| "localhost".to_string());
-        let port = std::env::var("TRTLLM_PORT").unwrap_or_else(|_| "8000".to_string());
+        let port = std::env::var("TRTLLM_PORT").unwrap_or_else(|_| "9000".to_string());
         Self::new(format!("http://{}:{}", host, port))
     }
 
@@ -50,10 +50,7 @@ impl HttpLlmClient {
             .map_err(|e| format!("GET /v1/models failed: {}", e))?;
 
         if !resp.status().is_success() {
-            return Err(format!(
-                "GET /v1/models returned HTTP {}",
-                resp.status()
-            ));
+            return Err(format!("GET /v1/models returned HTTP {}", resp.status()));
         }
 
         let body: ModelsResponse = resp
@@ -65,10 +62,7 @@ impl HttpLlmClient {
     }
 
     /// Build the wire-format ChatCompletionRequest from an InferenceRequest.
-    fn build_wire_request(
-        req: &InferenceRequest,
-        capability: Capability,
-    ) -> ChatCompletionRequest {
+    fn build_wire_request(req: &InferenceRequest, capability: Capability) -> ChatCompletionRequest {
         let model_id = capability.model_id().to_string();
         let max_tokens = req.max_tokens.unwrap_or(MAX_TOKENS_DEFAULT);
         let temperature = req.temperature.unwrap_or(TEMPERATURE_DEFAULT);

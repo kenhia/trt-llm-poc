@@ -2,7 +2,7 @@
 // This file will not compile until T014 provides `Capability` and `resolve_capability`.
 // Once T014 is implemented these tests must all pass: `cargo test --test routing`
 
-use rust_client::capability::{resolve_capability, Capability};
+use rust_client::capability::{Capability, resolve_capability};
 use rust_client::models::{InferenceRequest, Message, MessageContent};
 use uuid::Uuid;
 
