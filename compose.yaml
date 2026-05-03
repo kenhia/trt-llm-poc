@@ -1,0 +1,62 @@
+# compose.yaml — Triton + TRT-LLM serving container (Track B)
+#
+# INSTALL: copy this file to $TRTLLM_HOME/compose.yaml with:
+#   just compose-install
+# Then start with: just compose-up
+#
+# ENV: create $TRTLLM_HOME/.env from .env.example before starting.
+# Both HF_TOKEN and TRTLLM_HOME must be set.
+
+services:
+  triton-trtllm:
+    image: nvcr.io/nvidia/tritonserver:25.05-trtllm-python-py3
+
+    container_name: triton-trtllm
+
+    # restart: unless-stopped means the container comes back after a host reboot
+    # automatically, without any manual intervention (FR-005, SC-003).
+    restart: unless-stopped
+
+    # nvidia runtime exposes the RTX 5090 GPU to the container (FR-001).
+    runtime: nvidia
+
+    environment:
+      # HF_TOKEN is needed at runtime for any gated model downloads inside the container.
+      HF_TOKEN: ${HF_TOKEN}
+      # Tell NVIDIA which GPUs to expose; "all" = all available GPUs.
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+
+    # shm_size: 2gb — shared memory for inter-process tensor transfers inside Triton.
+    # Increase to 4gb or 8gb if you see "out of shared memory" errors under concurrency.
+    shm_size: "2gb"
+
+    ulimits:
+      # memlock: required to allow the GPU driver to lock memory pages.
+      memlock: -1
+      # stack: large stack size prevents overflows in deep model call chains.
+      stack: 67108864
+
+    ports:
+      # 8000: Triton HTTP endpoint — used by the Rust client (FR-004, FR-008).
+      - "8000:8000"
+      # 8001: Triton gRPC endpoint — not used by the Rust client in this POC, exposed for completeness.
+      - "8001:8001"
+      # 8002: Triton metrics endpoint (Prometheus-compatible).
+      - "8002:8002"
+
+    volumes:
+      # Mount the entire TRTLLM_HOME so Triton can reach engines, models, and model_repo.
+      - ${TRTLLM_HOME}:/workspace/trtllm
+      # Mount the Triton model repository. config.pbtxt files in model_repo/ tell Triton
+      # which engines to load and how to expose them. See triton-model-repo/ in this repo
+      # for templates; copy/symlink them into $TRTLLM_HOME/model_repo/ after engine build.
+      - ${TRTLLM_HOME}/model_repo:/model_repo
+
+    working_dir: /workspace
+
+    # Start Triton server pointing at the model repository.
+    # model_repo/ must contain at least one valid config.pbtxt before starting.
+    # See triton-model-repo/ in the repo for templates; copy them with:
+    #   cp -r triton-model-repo/qwen-coder $TRTLLM_HOME/model_repo/
+    command: ["tritonserver", "--model-repository=/model_repo"]

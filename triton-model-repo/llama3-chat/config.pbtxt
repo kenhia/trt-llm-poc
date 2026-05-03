@@ -1,0 +1,108 @@
+# Triton model config for llama3-chat (Llama 3.1 8B Instruct — chat capability)
+#
+# TEMPLATE — fields marked [TODO] must be updated after engine build.
+#
+# Usage:
+#   cp -r triton-model-repo/llama3-chat $TRTLLM_HOME/model_repo/
+#   Edit $TRTLLM_HOME/model_repo/llama3-chat/config.pbtxt
+#   Update at minimum: engine_dir, tokenizer_dir
+#
+# Reference: https://github.com/triton-inference-server/tensorrtllm_backend/blob/main/README.md
+
+name: "llama3-chat"
+backend: "tensorrtllm"
+
+# max_batch_size: maximum number of sequences processed in one scheduler iteration.
+# 1 is safe for initial POC; increase with profiling once serving is confirmed working.
+# [TODO] increase after smoke-test confirms stability at batch=1
+max_batch_size: 1
+
+model_transaction_policy {
+  # decoupled: true enables streaming responses; false = request/response pairs only.
+  # Must be false for the OpenAI-compatible /v1/chat/completions endpoint in this POC.
+  decoupled: false
+}
+
+parameters {
+  key: "gpt_model_type"
+  value: {
+    # Required by Triton 25.x TRT-LLM backend.
+    # inflight_fused_batching = in-flight batching with paged KV cache (recommended).
+    string_value: "inflight_fused_batching"
+  }
+}
+
+parameters {
+  key: "xgrammar_tokenizer_info_path"
+  value: {
+    # Required by Triton 25.x TRT-LLM backend. Empty = xgrammar structured-output disabled.
+    string_value: ""
+  }
+}
+
+parameters {
+  key: "gpt_model_path"
+  value: {
+    # [TODO] Set to the absolute path where trtllm-build wrote the engine files.
+    # Default layout from this repo: $TRTLLM_HOME/engines/llama3-chat
+    # Inside the container this is: /workspace/trtllm/engines/llama3-chat
+    string_value: "/workspace/trtllm/engines/llama3-chat"
+  }
+}
+
+parameters {
+  key: "tokenizer_dir"
+  value: {
+    # [TODO] Set to the HuggingFace model directory used for tokenization.
+    # Must match the model used for the engine build (not the checkpoint dir).
+    string_value: "/workspace/trtllm/models/llama3-8b-instruct"
+  }
+}
+
+parameters {
+  key: "max_tokens_in_paged_kv_cache"
+  value: {
+    # [TODO] Tune based on observed VRAM after engine is loaded.
+    # Leave empty to let Triton auto-calculate from available VRAM.
+    # Set explicitly to a lower value (e.g., "4096") if OOM errors occur.
+    string_value: ""
+  }
+}
+
+parameters {
+  key: "batch_scheduler_policy"
+  value: {
+    # guaranteed_no_evict: no request is evicted from KV cache once started.
+    # Use for POC; evaluate max_utilization for production throughput.
+    string_value: "guaranteed_no_evict"
+  }
+}
+
+parameters {
+  key: "executor_worker_path"
+  value {
+    # Path to the TRT-LLM executor worker binary inside the Triton container.
+    # Standard location in the tritonserver trtllm-python-py3 image.
+    string_value: "/opt/tritonserver/backends/tensorrtllm/trtllmExecutorWorker"
+  }
+}
+
+parameters {
+  key: "kv_cache_free_gpu_mem_fraction"
+  value: {
+    # Fraction of free GPU memory to allocate for KV cache blocks.
+    # 0.9 is the standard default; lower if other models are loaded concurrently.
+    # [TODO] Reduce (e.g., "0.5") if loading all three models simultaneously.
+    string_value: "0.9"
+  }
+}
+
+instance_group [
+  {
+    # count: number of model instances. 1 = single GPU, single instance.
+    # [TODO] Set to number of available GPUs for multi-GPU serving.
+    count: 1
+    kind: KIND_GPU
+    gpus: [ 0 ]
+  }
+]

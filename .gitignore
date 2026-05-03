@@ -1,0 +1,18 @@
+.scratch/
+
+# Environment — never commit secrets
+.env
+
+# Rust build artifacts
+rust-client/target/
+
+# Host model/engine storage (lives at /ai/trtllm-poc, outside the repo)
+trtllm/
+
+# macOS / editor noise
+.DS_Store
+Thumbs.db
+*.swp
+*.tmp
+
+

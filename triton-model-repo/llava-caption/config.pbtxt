@@ -1,0 +1,113 @@
+# Triton model config for llava-caption (LLaVA-1.6 Mistral 7B — image caption capability)
+#
+# TEMPLATE — fields marked [TODO] must be updated after engine build.
+#
+# ⚠️  IMPORTANT: LLaVA-1.6 is a multi-modal model with a separate visual encoder.
+#     The Triton model repository for LLaVA requires ADDITIONAL components beyond
+#     this single config.pbtxt. See the fallback note below.
+#
+# Usage:
+#   cp -r triton-model-repo/llava-caption $TRTLLM_HOME/model_repo/
+#   Edit $TRTLLM_HOME/model_repo/llava-caption/config.pbtxt
+#   Update at minimum: engine_dir, tokenizer_dir, visual_engine_dir
+#
+# FALLBACK: If multi-modal pipeline proves overly complex (separate visual encoder engine,
+#   multi-component config.pbtxt structure), fall back to Qwen2-VL-7B-Instruct which has
+#   simpler Triton integration. See docs/decisions/003-model-selection.md Fallback Plan.
+#
+# Reference: https://github.com/triton-inference-server/tensorrtllm_backend/blob/main/README.md
+# Multi-modal reference: https://github.com/NVIDIA/TensorRT-LLM/tree/main/examples/multimodal
+
+name: "llava-caption"
+backend: "tensorrtllm"
+
+max_batch_size: 1
+
+model_transaction_policy {
+  decoupled: false
+}
+
+parameters {
+  key: "gpt_model_type"
+  value: {
+    # Required by Triton 25.x TRT-LLM backend.
+    string_value: "inflight_fused_batching"
+  }
+}
+
+parameters {
+  key: "xgrammar_tokenizer_info_path"
+  value: {
+    # Required by Triton 25.x TRT-LLM backend. Empty = xgrammar structured-output disabled.
+    string_value: ""
+  }
+}
+
+parameters {
+  key: "gpt_model_path"
+  value: {
+    # [TODO] Path to the LLM (language decoder) engine built by trtllm-build.
+    # The LLaVA engine build requires two separate steps:
+    #   1. Build visual encoder engine (CLIP/ViT component)
+    #   2. Build LLM decoder engine (Mistral-7B backbone)
+    # See TRT-LLM multimodal examples for the exact build commands.
+    string_value: "/workspace/trtllm/engines/llava-caption"
+  }
+}
+
+parameters {
+  key: "tokenizer_dir"
+  value: {
+    # [TODO] HuggingFace model directory (llava-hf/llava-v1.6-mistral-7b-hf)
+    string_value: "/workspace/trtllm/models/llava-v1.6-mistral-7b"
+  }
+}
+
+parameters {
+  key: "visual_engine_dir"
+  value: {
+    # [TODO] Path to the separately-built visual encoder (CLIP/ViT) TRT engine.
+    # Multi-modal models require a separate engine for the vision component.
+    string_value: "/workspace/trtllm/engines/llava-caption-visual"
+  }
+}
+
+parameters {
+  key: "max_tokens_in_paged_kv_cache"
+  value: {
+    # [TODO] LLaVA uses extra VRAM for the visual encoder; tune carefully.
+    # Est. ~12 GB total for LLaVA 7B. May need lower fraction than text-only models.
+    string_value: ""
+  }
+}
+
+parameters {
+  key: "batch_scheduler_policy"
+  value: {
+    string_value: "guaranteed_no_evict"
+  }
+}
+
+parameters {
+  key: "executor_worker_path"
+  value {
+    string_value: "/opt/tritonserver/backends/tensorrtllm/trtllmExecutorWorker"
+  }
+}
+
+parameters {
+  key: "kv_cache_free_gpu_mem_fraction"
+  value: {
+    # [TODO] Reduce to 0.5 or lower when loading all three models simultaneously.
+    # LLaVA is the most VRAM-intensive of the three planned models (~12 GB).
+    string_value: "0.9"
+  }
+}
+
+instance_group [
+  {
+    count: 1
+    kind: KIND_GPU
+    gpus: [ 0 ]
+  }
+]

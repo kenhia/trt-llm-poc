@@ -1,0 +1,96 @@
+# Triton model config for qwen-coder (Qwen2.5-Coder 7B Instruct — code capability)
+#
+# TEMPLATE — fields marked [TODO] must be updated after engine build.
+#
+# Usage:
+#   cp -r triton-model-repo/qwen-coder $TRTLLM_HOME/model_repo/
+#   Edit $TRTLLM_HOME/model_repo/qwen-coder/config.pbtxt
+#   Update at minimum: engine_dir, tokenizer_dir
+#
+# Reference: https://github.com/triton-inference-server/tensorrtllm_backend/blob/main/README.md
+
+name: "qwen-coder"
+backend: "tensorrtllm"
+
+# max_batch_size: 1 is safe for initial POC.
+# [TODO] increase after smoke-test confirms stability at batch=1
+max_batch_size: 1
+
+model_transaction_policy {
+  decoupled: false
+}
+
+parameters {
+  key: "gpt_model_type"
+  value: {
+    # Required by Triton 25.x TRT-LLM backend.
+    # inflight_fused_batching = in-flight batching with paged KV cache (recommended).
+    string_value: "inflight_fused_batching"
+  }
+}
+
+parameters {
+  key: "xgrammar_tokenizer_info_path"
+  value: {
+    # Required by Triton 25.x TRT-LLM backend. Empty = xgrammar structured-output disabled.
+    string_value: ""
+  }
+}
+
+parameters {
+  key: "gpt_model_path"
+  value: {
+    # Path to the directory where trtllm-build wrote the engine files.
+    # Default layout from this repo: $TRTLLM_HOME/engines/qwen-coder
+    # Inside the container this is: /workspace/trtllm/engines/qwen-coder
+    # Note: this engine was built first (Llama access was pending during initial testing).
+    string_value: "/workspace/trtllm/engines/qwen-coder"
+  }
+}
+
+parameters {
+  key: "tokenizer_dir"
+  value: {
+    # [TODO] Set to the HuggingFace model directory used for tokenization.
+    # Must match the model used for the engine build.
+    string_value: "/workspace/trtllm/models/qwen-coder-7b"
+  }
+}
+
+parameters {
+  key: "max_tokens_in_paged_kv_cache"
+  value: {
+    # [TODO] Tune based on observed VRAM. Leave empty for auto-calculation.
+    string_value: ""
+  }
+}
+
+parameters {
+  key: "batch_scheduler_policy"
+  value: {
+    string_value: "guaranteed_no_evict"
+  }
+}
+
+parameters {
+  key: "executor_worker_path"
+  value {
+    string_value: "/opt/tritonserver/backends/tensorrtllm/trtllmExecutorWorker"
+  }
+}
+
+parameters {
+  key: "kv_cache_free_gpu_mem_fraction"
+  value: {
+    # [TODO] Reduce (e.g., "0.5") if loading all three models simultaneously.
+    string_value: "0.9"
+  }
+}
+
+instance_group [
+  {
+    count: 1
+    kind: KIND_GPU
+    gpus: [ 0 ]
+  }
+]

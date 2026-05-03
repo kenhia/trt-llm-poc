@@ -1,50 +1,133 @@
-# [PROJECT_NAME] Constitution
-<!-- Example: Spec Constitution, TaskFlow Constitution, etc. -->
+<!--
+SYNC IMPACT REPORT
+==================
+Version change: (none) → 1.0.0
+Modified principles: N/A (initial ratification)
+Added sections: Core Principles (6), Technology Context, Development Workflow, Governance
+Removed sections: N/A
+Templates requiring updates:
+  - .specify/templates/plan-template.md ✅ reviewed, no changes required
+  - .specify/templates/spec-template.md ✅ reviewed, no changes required
+  - .specify/templates/tasks-template.md ✅ reviewed, no changes required
+Follow-up TODOs: none — all placeholders resolved
+-->
+
+# TRT-LLM POC Constitution
 
 ## Core Principles
 
-### [PRINCIPLE_1_NAME]
-<!-- Example: I. Library-First -->
-[PRINCIPLE_1_DESCRIPTION]
-<!-- Example: Every feature starts as a standalone library; Libraries must be self-contained, independently testable, documented; Clear purpose required - no organizational-only libraries -->
+### I. Documentation First
 
-### [PRINCIPLE_2_NAME]
-<!-- Example: II. CLI Interface -->
-[PRINCIPLE_2_DESCRIPTION]
-<!-- Example: Every library exposes functionality via CLI; Text in/out protocol: stdin/args → stdout, errors → stderr; Support JSON + human-readable formats -->
+Every setup step, architectural decision, model choice, and tunable parameter MUST be documented
+as it happens — not retroactively. Documentation MUST be usable by both the human owner and an
+AI coding agent picking up the project cold.
 
-### [PRINCIPLE_3_NAME]
-<!-- Example: III. Test-First (NON-NEGOTIABLE) -->
-[PRINCIPLE_3_DESCRIPTION]
-<!-- Example: TDD mandatory: Tests written → User approved → Tests fail → Then implement; Red-Green-Refactor cycle strictly enforced -->
+- Each `just` recipe and Docker flag MUST have a comment explaining the "why", not just the "what"
+- Decision records (ADR-style, even if informal) MUST capture the options considered and the
+  reason for the choice made
+- Any deviation from the prep document (`TRT-LLM POC Weekend Spec Prep.md`) MUST be noted inline
+- All docs live under `docs/` at the repo root; agent-consumable context goes in `.specify/`
 
-### [PRINCIPLE_4_NAME]
-<!-- Example: IV. Integration Testing -->
-[PRINCIPLE_4_DESCRIPTION]
-<!-- Example: Focus areas requiring integration tests: New library contract tests, Contract changes, Inter-service communication, Shared schemas -->
+### II. Ansible-k Handoff Required for Host Changes
 
-### [PRINCIPLE_5_NAME]
-<!-- Example: V. Observability, VI. Versioning & Breaking Changes, VII. Simplicity -->
-[PRINCIPLE_5_DESCRIPTION]
-<!-- Example: Text I/O ensures debuggability; Structured logging required; Or: MAJOR.MINOR.BUILD format; Or: Start simple, YAGNI principles -->
+Any modification to the host machine — installing a tool, adding a Docker network/volume,
+changing NVIDIA runtime config, editing `/etc/systemd/`, or any persistent system change — MUST
+be captured in a form suitable for promotion to the ansible-k playbooks at
+`/home/ken/src/config-src/ansible-k`.
 
-## [SECTION_2_NAME]
-<!-- Example: Additional Constraints, Security Requirements, Performance Standards, etc. -->
+- Document new tools as: tool name, install command, version pinned, purpose
+- Document new system config as: file path, content or diff, service dependency
+- A `docs/ansible-handoff.md` file accumulates these items throughout the POC
+- This is non-negotiable even for a POC; host drift that isn't captured is technical debt
 
-[SECTION_2_CONTENT]
-<!-- Example: Technology stack requirements, compliance standards, deployment policies, etc. -->
+### III. POC Pragmatism (YAGNI Enforced)
 
-## [SECTION_3_NAME]
-<!-- Example: Development Workflow, Review Process, Quality Gates, etc. -->
+This is a throwaway learning project with a weekend time budget. Working over perfect.
+Completeness over elegance. Learning over production-readiness.
 
-[SECTION_3_CONTENT]
-<!-- Example: Code review requirements, testing gates, deployment approval process, etc. -->
+- MUST NOT over-engineer: no abstractions for one-time operations, no premature
+  generalization, no speculative features
+- MUST follow the two-track progression: Track A (dev/engine-build) proves TRT-LLM works;
+  Track B (Triton serving) exercises the service boundary for Rust integration
+- Feature scope is locked to the three capabilities defined in the prep doc:
+  general chat, coding assistant, image captioning
+- If a direction is blocked, document the blocker and take the next simplest path
+
+### IV. Spec-Driven (SDD — Relaxed for POC)
+
+Specifications drive implementation. For this POC, lightweight specs are acceptable, but the
+intent and acceptance criteria MUST be written down before code is written.
+
+- User stories and acceptance criteria defined in `spec.md` MUST be referenced by tasks
+- "Spec first" means: write what done looks like, then implement to that description
+- Formal spec review is waived; the prep document serves as the initial specification seed
+- Any scope change after spec is written MUST be reflected back in the spec, not just the code
+
+### V. Test-Driven (TDD — Relaxed for POC)
+
+Tests are required for Rust client code. Integration smoke-tests are required for the three
+acceptance criteria (GPU visible, serving endpoint reachable, three capabilities respond).
+Unit test coverage targets are relaxed given POC scope.
+
+- Rust crate: `cargo test` MUST pass before a feature is considered done
+- Integration acceptance: the checklist in the prep doc (`5.5 Acceptance criteria`) serves as
+  the integration test suite; each item MUST be manually or automatically verified and checked off
+- Test infrastructure (fixtures, mock servers) MUST NOT be more complex than the code under test
+- No test = no merge for Rust API boundary code; scripts and config are exempt
+
+### VI. Observability and Simplicity
+
+The system MUST be debuggable at every layer without specialized tooling.
+
+- `nvidia-smi` MUST confirm GPU visibility before any model work proceeds
+- Latency, model chosen, and token counts MUST be logged per request in the Rust client
+  (as defined in the prep doc observability hooks)
+- Log to stdout/stderr; structured JSON preferred but plain text acceptable for POC
+- When a simpler implementation and a more capable one both satisfy the acceptance criteria,
+  the simpler one MUST be chosen
+
+## Technology Context
+
+**Host**: NVIDIA GeForce RTX 5090 (Blackwell, SM 12.0) · Driver 595.58.03 · CUDA 13.2  
+**Docker images**:
+- Track A (dev): `nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc13`
+- Track B (serving): `nvcr.io/nvidia/tritonserver:25.05-trtllm-python-py3`
+
+**Rust stack**: `reqwest`, `serde`/`serde_json`, `base64`, `tokio`  
+**Lifecycle tooling**: `just` (justfile), Docker Compose (`restart: unless-stopped`)  
+**Persistence root**: `$TRTLLM_HOME` (default `/ai/trtllm-poc`), with `models/`, `engines/`,
+`cache/`, `logs/`, `model_repo/` subdirectories
+
+**Model targets (POC-sane, 32 GB-friendly)**:
+- Chat: Llama 3.x 8B Instruct
+- Code: Qwen2.5-Coder 7B Instruct
+- Caption: LLaVA-family small VLM (TRT-LLM supported)
+
+**Ansible-k project**: `/home/ken/src/config-src/ansible-k` — receives host-change docs
+
+## Development Workflow
+
+1. **Spec first**: acceptance criteria written in `spec.md` before implementation begins
+2. **Track A before Track B**: prove GPU + engine build works before standing up Triton serving
+3. **Document as you go**: update `docs/` and `docs/ansible-handoff.md` during, not after
+4. **Rust tests gate merges**: `cargo test` green required for Rust client code
+5. **Check off acceptance criteria**: the checklist from the prep doc is the definition of done
+6. **Capture blockers**: if something doesn't work, write a decision record noting what was tried
+   and what path was taken instead
+
+Constitution compliance is verified at the start of each planning session and before
+closing the POC. Any agent working in this repo MUST read this file before generating tasks.
 
 ## Governance
-<!-- Example: Constitution supersedes all other practices; Amendments require documentation, approval, migration plan -->
 
-[GOVERNANCE_RULES]
-<!-- Example: All PRs/reviews must verify compliance; Complexity must be justified; Use [GUIDANCE_FILE] for runtime development guidance -->
+This constitution supersedes all other practices for the duration of this POC.
 
-**Version**: [CONSTITUTION_VERSION] | **Ratified**: [RATIFICATION_DATE] | **Last Amended**: [LAST_AMENDED_DATE]
-<!-- Example: Version: 2.1.1 | Ratified: 2025-06-13 | Last Amended: 2025-07-16 -->
+- **Amendments**: Any principle change MUST increment the version and record the rationale
+  in a `<!-- SYNC IMPACT REPORT -->` comment at the top of this file
+- **Versioning**: MAJOR for principle removal/redefinition; MINOR for new principle/section;
+  PATCH for wording clarifications
+- **Compliance review**: performed at start of plan phase and before POC close-out
+- **Retirement**: this constitution governs only the POC repo; learnings that affect the
+  long-lived host setup are promoted to ansible-k, not encoded here permanently
+
+**Version**: 1.0.0 | **Ratified**: 2026-05-01 | **Last Amended**: 2026-05-01
