@@ -5,6 +5,11 @@ host: build a model engine inside the dev container (Track A), serve it via Trit
 (Track B), and call it from a Rust client that routes requests to chat, code, or
 caption models based on request content.
 
+> **Note:** This is a POC for learning how to use TensorRT-LLM. It makes
+> assumptions about my specific hardware and environment. If you are doing your
+> own initial investigation into TRT-LLM, this may give you some pointers, but
+> you will almost certainly need to adjust paths and configuration for your setup.
+
 ## Hardware & Stack
 
 | Layer | Component |
@@ -24,16 +29,16 @@ See [quickstart.md](specs/001-trt-llm-poc-end-to-end/quickstart.md) for the fast
 For the full step-by-step guide (toolkit install, engine build, Triton setup):
 [docs/setup.md](docs/setup.md).
 
-## Acceptance Criteria
+## Models
 
-| ID | Criterion |
-|----|-----------|
-| SC-001 | GPU visible inside Docker container within 30 s of start (`nvidia-smi`) |
-| SC-002 | First inference response from Triton in ≤ 60 s (cold-start acceptable) |
-| SC-003 | Triton reachable on `localhost:8000` within 2 min of reboot — no manual action |
-| SC-004 | All three capabilities (chat, code, caption) return non-empty coherent responses via Rust client |
-| SC-005 | `cargo test` passes with zero failures |
-| SC-006 | `docs/setup.md` + `docs/ansible-handoff.md` cover 100% of host changes — no undocumented steps |
+| Pipeline | Model | Capability |
+|----------|-------|------------|
+| `ensemble_qwen` | Qwen2.5-Coder 7B | Code generation |
+| `ensemble_llama` | Llama 3.1 8B Instruct | Chat |
+| `ensemble_vision` | LLaVA 1.5 7B | Image captioning |
+
+Only one model pipeline fits in VRAM at a time (~15 GB each on 32 GB).
+Use `just models-load <pipeline>` / `just models-unload <pipeline>` to swap.
 
 ## Repository Layout
 
@@ -41,6 +46,11 @@ For the full step-by-step guide (toolkit install, engine build, Triton setup):
 .
 ├── compose.yaml                    # Triton serving stack (Track B)
 ├── justfile                        # Task runner (just dev, just compose-up, …)
+├── scripts/
+│   ├── setup-model-repo.sh         # Create pipeline dirs from container templates
+│   ├── start-triton.sh             # Triton entrypoint (EXPLICIT model control)
+│   ├── triton_wrapper.py           # Wrapper: OpenAI frontend + KServe
+│   └── vision-smoke-test.py        # Binary-protocol vision smoke test
 ├── rust-client/                    # Rust inference client
 │   ├── src/
 │   │   ├── capability.rs           # Request routing (Chat / Code / Caption)
@@ -57,30 +67,24 @@ For the full step-by-step guide (toolkit install, engine build, Triton setup):
 ├── docs/
 │   ├── setup.md                    # Complete setup guide (§0-§6)
 │   └── ansible-handoff.md          # All host changes for ansible-k automation
-└── specs/001-trt-llm-poc-end-to-end/
-    ├── spec.md
-    ├── plan.md
-    ├── tasks.md
-    ├── quickstart.md
-    ├── data-model.md
-    ├── research.md
-    └── decisions/
+└── specs/                          # Feature specs (one dir per sprint)
 ```
 
 ## Key Commands
 
 ```sh
-just dev          # Enter TRT-LLM dev container (Track A)
-just compose-up   # Start Triton serving stack (Track B)
-just compose-logs # Tail Triton logs
-just ps           # Show running containers
-cargo build       # Build Rust client
-cargo test        # Run all tests (7 routing unit tests)
-cargo run -- smoke-test  # Run live smoke test against Triton
+just dev              # Enter TRT-LLM dev container (Track A)
+just compose-up       # Start Triton serving stack (Track B)
+just compose-logs     # Tail Triton logs
+just models-load qwen # Load a pipeline into GPU memory
+just models-unload qwen
+just models-status    # Show loaded/unloaded state of all pipelines
+just smoke-all        # Sequential load→test→unload for all three pipelines
+cargo test            # Run all tests (7 routing unit tests)
 ```
 
 ## Decisions
 
-- [001 — Container Strategy](specs/001-trt-llm-poc-end-to-end/decisions/001-container-strategy.md)
-- [002 — Autostart Method](specs/001-trt-llm-poc-end-to-end/decisions/002-autostart-method.md)
-- [003 — Model Selection](specs/001-trt-llm-poc-end-to-end/decisions/003-model-selection.md)
+- [001 — Compose vs Systemd](docs/decisions/001-compose-vs-systemd.md)
+- [002 — OpenAI-Compat vs Triton-Native](docs/decisions/002-openai-compat-vs-triton-native.md)
+- [003 — Model Selection](docs/decisions/003-model-selection.md)

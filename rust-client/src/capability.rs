@@ -4,28 +4,23 @@ use crate::models::InferenceRequest;
 /// Determines which Triton model and model_id are used for a request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Capability {
-    /// General conversational LLM → model_id "ensemble"
+    /// General conversational LLM → model_id "ensemble_llama"
     Chat,
-    /// Coding-focused LLM → model_id "ensemble"
+    /// Coding-focused LLM → model_id "ensemble_qwen"
     Code,
-    /// Vision-language model for image description → model_id "ensemble"
-    ///
-    /// NOTE: In this single-engine POC all three capabilities route to the
-    /// same `inflight_batcher_llm` pipeline ("ensemble").  When LLaVA is
-    /// added as a second engine, Caption should route to its own pipeline
-    /// entry-point model.
+    /// Vision-language model for image description → model_id "ensemble_vision"
     Caption,
 }
 
 impl Capability {
     /// Returns the Triton model identifier for this capability.
-    /// With the `inflight_batcher_llm` multi-model pipeline the client-facing
-    /// entry point is always "ensemble" (or "tensorrt_llm_bls").
+    /// Each capability routes to its dedicated pipeline entry point.
+    /// See data-model.md for the full pipeline naming convention.
     pub fn model_id(&self) -> &'static str {
         match self {
-            Capability::Chat => "ensemble",
-            Capability::Code => "ensemble",
-            Capability::Caption => "ensemble",
+            Capability::Chat => "ensemble_llama",
+            Capability::Code => "ensemble_qwen",
+            Capability::Caption => "ensemble_vision",
         }
     }
 }

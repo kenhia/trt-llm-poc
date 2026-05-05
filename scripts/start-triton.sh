@@ -15,10 +15,12 @@
 #   8002  Triton metrics — opened by the embedded Triton
 #
 # ENV vars (set in compose.yaml / $TRTLLM_HOME/.env):
-#   TRITON_MODEL_REPO   — path to model repository  (default: /model_repo)
-#   OPENAI_TOKENIZER    — path or HF name for tokenizer
-#                         (default: /workspace/trtllm/models/qwen-coder-7b)
-#   OPENAI_PORT         — port for the OpenAI frontend  (default: 9000)
+#   TRITON_MODEL_REPO          path to model repository  (default: /model_repo)
+#   OPENAI_TOKENIZER           path or HF name for tokenizer
+#                              (default: /workspace/trtllm/models/qwen-coder-7b)
+#   OPENAI_PORT                port for the OpenAI frontend  (default: 9000)
+#   DEFAULT_MODEL              pipeline to auto-load at startup: qwen|llama|vision|''
+#   TRITON_MODEL_CONTROL_MODE  explicit (default) | none
 
 set -euo pipefail
 
@@ -26,15 +28,20 @@ TRITON_MODEL_REPO="${TRITON_MODEL_REPO:-/model_repo}"
 OPENAI_TOKENIZER="${OPENAI_TOKENIZER:-/workspace/trtllm/models/qwen-coder-7b}"
 OPENAI_PORT="${OPENAI_PORT:-9000}"
 
-OPENAI_FRONTEND="/opt/tritonserver/python/openai/openai_frontend/main.py"
+# triton_wrapper.py monkey-patches tritonserver.Server to inject EXPLICIT model-control
+# mode before delegating to main.py.  Mounted at /triton_wrapper.py by compose.yaml.
+WRAPPER="/triton_wrapper.py"
 
-echo "[start-triton] Starting OpenAI frontend on port ${OPENAI_PORT}"
+echo "[start-triton] Starting OpenAI frontend (via wrapper) on port ${OPENAI_PORT}"
 echo "[start-triton] Model repository: ${TRITON_MODEL_REPO}"
 echo "[start-triton] Tokenizer: ${OPENAI_TOKENIZER}"
+echo "[start-triton] DEFAULT_MODEL: ${DEFAULT_MODEL:-'(none)'}"
 
 # exec replaces this shell so Docker tracks the Python process directly.
-# main.py starts an embedded Triton, loads models, then starts Uvicorn.
-exec python3 "${OPENAI_FRONTEND}" \
+# --enable-kserve-frontends activates the KServe HTTP control plane on port 8000
+# (POST /v2/repository/models/{name}/load|unload) used by `just models-*` recipes.
+exec python3 "${WRAPPER}" \
     --model-repository "${TRITON_MODEL_REPO}" \
     --tokenizer "${OPENAI_TOKENIZER}" \
-    --openai-port "${OPENAI_PORT}"
+    --openai-port "${OPENAI_PORT}" \
+    --enable-kserve-frontends
