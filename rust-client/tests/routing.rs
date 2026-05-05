@@ -24,12 +24,14 @@ fn req(system_hint: Option<&str>, image: Option<&str>) -> InferenceRequest {
 fn image_present_routes_to_caption() {
     let r = req(None, Some("base64imagedata"));
     assert!(matches!(resolve_capability(&r), Capability::Caption));
+    assert_eq!(Capability::Caption.model_id(), "ensemble_vision");
 }
 
 #[test]
 fn system_hint_code_routes_to_code() {
     let r = req(Some("code"), None);
     assert!(matches!(resolve_capability(&r), Capability::Code));
+    assert_eq!(Capability::Code.model_id(), "ensemble_qwen");
 }
 
 #[test]
@@ -42,6 +44,7 @@ fn system_hint_code_uppercase_routes_to_code() {
 fn no_image_no_hint_routes_to_chat() {
     let r = req(None, None);
     assert!(matches!(resolve_capability(&r), Capability::Chat));
+    assert_eq!(Capability::Chat.model_id(), "ensemble_llama");
 }
 
 #[test]

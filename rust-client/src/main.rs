@@ -49,59 +49,84 @@ async fn run_smoke_test() -> Result<(), String> {
         .map_err(|e| format!("Startup probe failed: {}", e))?;
     tracing::info!(models = ?loaded, "Models available");
 
+    // Only test capabilities whose ensemble model is currently loaded.
+    // This allows smoke-all to load one pipeline at a time and test it.
+    let is_loaded = |cap: Capability| loaded.contains(&cap.model_id().to_string());
+
     let mut all_ok = true;
+    let mut tests_run = 0u32;
 
     // --- Chat ---
-    all_ok &= run_request(
-        &client,
-        make_request(None, None, "Hello! What can you help me with today?"),
-        Capability::Chat,
-    )
-    .await;
+    if is_loaded(Capability::Chat) {
+        tests_run += 1;
+        all_ok &= run_request(
+            &client,
+            make_request(None, None, "Hello! What can you help me with today?"),
+            Capability::Chat,
+        )
+        .await;
+    } else {
+        tracing::info!("Skipping Chat — {} not loaded", Capability::Chat.model_id());
+    }
 
     // --- Code ---
-    all_ok &= run_request(
-        &client,
-        make_request(
-            Some("code"),
-            None,
-            "Write a Rust function that returns the nth Fibonacci number.",
-        ),
-        Capability::Code,
-    )
-    .await;
+    if is_loaded(Capability::Code) {
+        tests_run += 1;
+        all_ok &= run_request(
+            &client,
+            make_request(
+                Some("code"),
+                None,
+                "Write a Rust function that returns the nth Fibonacci number.",
+            ),
+            Capability::Code,
+        )
+        .await;
+    } else {
+        tracing::info!("Skipping Code — {} not loaded", Capability::Code.model_id());
+    }
 
     // --- Caption ---
-    // Caption requires a vision-language model (LLaVA).  In this single-engine POC only
-    // qwen-coder (text-only) is loaded, so the image request is expected to be rejected
-    // with HTTP 400 "only text message is supported".  This is recorded as SC-004 in the
-    // acceptance criteria and is NOT treated as a fatal smoke-test failure.
-    let stub_image = "/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8U\
-                      HRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAARC\
-                      AABAAEDASIA2wBDAAMCAgMCAgMDAwMEAwMEBQgFBQQEBQoH\
-                      BwYIDAoMCwsKCwsNCxAQDQ4RDgsLEBYQERMUFRUVDA8XGBYUGBIUFRT/\
-                      AABEIAAIBAAMB/8QAFgABAQEAAAAAAAAAAAAAAAAABgUE/8QAIhAAAQMEAgMB\
-                      AAAAAAAAAAAAAQIDBAUREiExQWH/xAAUAQEAAAAAAAAAAAAAAAAAAAAA/8QAFBEB\
-                      AAAAAAAAAAAAAAAAAAAAAP/aAAwDAQACEQMRAD8Amo3DcLkuirqKuequmpZal\
-                      5lTM8pOajqPUkkkkkkn/2Q==";
-    let caption_ok = run_request(
-        &client,
-        make_image_request(stub_image, "Describe this image briefly."),
-        Capability::Caption,
-    )
-    .await;
-    if !caption_ok {
-        tracing::warn!(
-            "Caption capability returned an error (expected: LLaVA engine not yet built). \
-             SC-004 requires a separate vision model. Continuing."
+    // Caption (LLaVA 1.5) requires pre-processed FP16 pixel values via the Triton
+    // binary HTTP extension.  The OpenAI /v1/chat/completions endpoint does not
+    // support image_url for this model_type, so Caption is tested separately by
+    // `just smoke-vision` (scripts/vision-smoke-test.py).
+    if is_loaded(Capability::Caption) {
+        tracing::info!(
+            "Skipping Caption in Rust smoke-test — use `just smoke-vision` for vision testing"
+        );
+    } else {
+        tracing::info!(
+            "Skipping Caption — {} not loaded",
+            Capability::Caption.model_id()
         );
     }
 
+    if tests_run == 0 {
+        // Caption is tested by smoke-vision.py; if only vision is loaded that's fine.
+        let has_vision = loaded.contains(&Capability::Caption.model_id().to_string());
+        if has_vision {
+            tracing::info!(
+                "No text capabilities loaded — vision pipeline present, delegating to smoke-vision"
+            );
+            return Ok(());
+        }
+        return Err(format!(
+            "smoke-test FAILED — no capabilities loaded. Expected one of: {}, {}, {}",
+            Capability::Chat.model_id(),
+            Capability::Code.model_id(),
+            Capability::Caption.model_id(),
+        ));
+    }
+
     if all_ok {
-        tracing::info!("smoke-test PASSED — Chat and Code capabilities responded");
+        tracing::info!(
+            tests_run,
+            "smoke-test PASSED — all loaded capabilities responded"
+        );
         Ok(())
     } else {
-        Err("smoke-test FAILED — one or more required capabilities did not respond".to_string())
+        Err("smoke-test FAILED — one or more loaded capabilities did not respond".to_string())
     }
 }
 
@@ -146,6 +171,7 @@ fn make_request(
     }
 }
 
+#[allow(dead_code)] // kept for future vision-via-OpenAI testing
 fn make_image_request(image_b64: &str, prompt: &str) -> InferenceRequest {
     InferenceRequest {
         id: Uuid::new_v4().to_string(),

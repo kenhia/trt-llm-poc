@@ -26,10 +26,16 @@ services:
       # Tell NVIDIA which GPUs to expose; "all" = all available GPUs.
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
-      # start-triton.sh config — override these in $TRTLLM_HOME/.env if needed.
+      # start-triton.sh / triton_wrapper.py config.
       # OPENAI_TOKENIZER points at the HF model dir used for chat-template tokenization.
       OPENAI_TOKENIZER: ${OPENAI_TOKENIZER:-/workspace/trtllm/models/qwen-coder-7b}
       OPENAI_PORT: ${OPENAI_PORT:-9000}
+      # Explicit model-control mode (default: explicit).
+      # Set to "none" to revert to legacy NONE mode (all models load at startup).
+      TRITON_MODEL_CONTROL_MODE: ${TRITON_MODEL_CONTROL_MODE:-explicit}
+      # Pipeline to auto-load after Triton becomes ready.
+      # Valid values: qwen | llama | vision | (empty = start with nothing loaded)
+      DEFAULT_MODEL: ${DEFAULT_MODEL:-qwen}
 
     # shm_size: 2gb — shared memory for inter-process tensor transfers inside Triton.
     # Increase to 4gb or 8gb if you see "out of shared memory" errors under concurrency.
@@ -55,11 +61,13 @@ services:
       # Mount the entire TRTLLM_HOME so Triton can reach engines, models, and model_repo.
       - ${TRTLLM_HOME}:/workspace/trtllm
       # Mount the Triton model repository. config.pbtxt files in model_repo/ tell Triton
-      # which engines to load and how to expose them. See triton-model-repo/ in this repo
-      # for templates; copy/symlink them into $TRTLLM_HOME/model_repo/ after engine build.
+      # which engines to load and how to expose them.
       - ${TRTLLM_HOME}/model_repo:/model_repo
-      # Mount the startup script from TRTLLM_HOME/scripts/ (installed by `just compose-install`).
+      # Mount the startup script and wrapper from TRTLLM_HOME/scripts/ (installed by `just compose-install`).
       - ${TRTLLM_HOME}/scripts/start-triton.sh:/start-triton.sh:ro
+      # triton_wrapper.py: monkey-patches tritonserver.Server for explicit model-control mode.
+      # Mounted at /triton_wrapper.py so start-triton.sh can exec it as `python3 /triton_wrapper.py`.
+      - ${TRTLLM_HOME}/scripts/triton_wrapper.py:/triton_wrapper.py:ro
 
     working_dir: /workspace
 

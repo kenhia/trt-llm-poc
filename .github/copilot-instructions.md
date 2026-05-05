@@ -1,5 +1,5 @@
 <!-- SPECKIT START -->
 For additional context about technologies to be used, project structure,
 shell commands, and other important information, read the current plan:
-`specs/001-trt-llm-poc-end-to-end/plan.md`
+`specs/002-three-model-poc/plan.md`
 <!-- SPECKIT END -->

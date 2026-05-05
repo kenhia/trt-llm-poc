@@ -415,118 +415,184 @@ to serve built engines via an OpenAI-compatible HTTP endpoint on port 9000.
 > are **incompatible** with Triton 25.05 and will fail to deserialize at load time. All
 > engines intended for Triton must be built **inside the Triton container**.
 
-> **Multi-model pipeline**: Triton 25.05 requires the full `inflight_batcher_llm` five-model
-> pipeline layout (`preprocessing`, `tensorrt_llm`, `postprocessing`, `ensemble`,
-> `tensorrt_llm_bls`). A single `config.pbtxt` is not sufficient. Use the templates bundled
-> in the container and `fill_template.py` to generate the correct model repository.
+> **Multi-pipeline naming**: All three model pipelines coexist in a single `model_repo/`
+> directory. Each pipeline uses a `{component}_{model}` naming convention (e.g.,
+> `ensemble_qwen`, `ensemble_llama`, `ensemble_vision`). Only one pipeline loads at a time
+> via explicit model-control mode (see §5).
 
-### §4.1 Install the Compose File
+### §4.1 Install the Compose File and Scripts
 
 ```bash
 # From repo root (on the host, not inside any container):
 just compose-install
 ```
 
-This copies `compose.yaml` to `$TRTLLM_HOME/compose.yaml`. The `compose-up` recipe
-reads it from there.
+This copies `compose.yaml`, `scripts/start-triton.sh`, `scripts/triton_wrapper.py`, and
+`scripts/setup-model-repo.sh` to `$TRTLLM_HOME`. The `compose-up` recipe reads from there.
 
-### §4.2 Build the Engine Inside the Triton Container
-
-The engine must be built inside the Triton 25.05 container so it targets TRT-LLM 0.19.0.
+### §4.2 Build the Qwen-Coder 7B Engine (Sprint 001 baseline)
 
 ```bash
-# 1. Start an interactive Triton container (Track B image, not the dev container):
-docker run -it --rm --gpus all --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 \
+# Run inside an interactive Triton 25.05 container:
+docker run -it --rm --gpus all --ulimit memlock=-1 --ulimit stack=67108864 \
   -v $TRTLLM_HOME:/workspace/trtllm \
-  nvcr.io/nvidia/tritonserver:25.05-trtllm-python-py3 \
-  bash
+  nvcr.io/nvidia/tritonserver:25.05-trtllm-python-py3 bash
 
-# 2. Inside the container — convert HF weights to TRT-LLM checkpoint format:
-#    (Qwen2.5-Coder-7B shown; adjust paths for other models)
-python3 /opt/tritonserver/backends/tensorrtllm/examples/qwen/convert_checkpoint.py \
+# Inside the container:
+python3 /app/examples/qwen/convert_checkpoint.py \
   --model_dir /workspace/trtllm/models/qwen-coder-7b \
-  --output_dir /workspace/trtllm/models/qwen-coder-7b-ckpt-0.19 \
+  --output_dir /workspace/trtllm/engines/qwen-coder/ckpt \
   --dtype float16
 
-# 3. Build the TRT-LLM engine:
 trtllm-build \
-  --checkpoint_dir /workspace/trtllm/models/qwen-coder-7b-ckpt-0.19 \
+  --checkpoint_dir /workspace/trtllm/engines/qwen-coder/ckpt \
   --output_dir /workspace/trtllm/engines/qwen-coder \
   --gemm_plugin float16 \
-  --max_batch_size 1 \
+  --max_batch_size 4 \
   --max_input_len 2048 \
-  --max_seq_len 3072
-
-# 4. Exit the container (engines persist on the host via the volume mount):
+  --max_seq_len 4096
 exit
 ```
 
-**If the engine directory is owned by root** (because it was written by root inside the
-container), fix permissions on the host:
+**If engine files are owned by root**: `sudo chown -R $USER:$USER $TRTLLM_HOME/engines/`
+
+### §4.3 Build the Llama 3.1 8B Instruct Engine
+
+Requires a HuggingFace token with Llama access (`HF_TOKEN` in `.env`).
+
 ```bash
-sudo chown -R $USER:$USER $TRTLLM_HOME/engines/
+just build-llama
 ```
 
-### §4.3 Set Up the Triton Model Repository (inflight_batcher_llm)
+This runs the conversion and build steps inside a Triton 25.05 container automatically
+(~30–60 min, requires GPU + ~16 GB VRAM). Output:
 
-Triton 25.05 requires the full five-model pipeline. Generate it from the container's
-bundled templates using `fill_template.py`:
+```
+$TRTLLM_HOME/engines/llama/rank0.engine
+$TRTLLM_HOME/engines/llama/config.json
+```
+
+The equivalent manual steps (if running interactively):
 
 ```bash
-# 1. Copy the pipeline templates out of the container image:
-docker run --rm \
-  nvcr.io/nvidia/tritonserver:25.05-trtllm-python-py3 \
-  bash -c "tar -cf - /opt/tritonserver/backends/tensorrtllm/inflight_batcher_llm" \
-  | tar -xf - --strip-components=6 -C $TRTLLM_HOME/model_repo
-
-# 2. Run fill_template.py inside the container to substitute engine/tokenizer paths:
-docker run --rm \
+docker run -it --rm --gpus all --ulimit memlock=-1 --ulimit stack=67108864 \
+  -e HF_TOKEN=$HF_TOKEN \
   -v $TRTLLM_HOME:/workspace/trtllm \
-  nvcr.io/nvidia/tritonserver:25.05-trtllm-python-py3 \
-  bash -c "
-    cd /workspace/trtllm/model_repo/tensorrt_llm
-    python3 /opt/tritonserver/backends/tensorrtllm/tools/fill_template.py \
-      --in_place config.pbtxt \
-      decoupled_mode:False,\
-      engine_dir:/workspace/trtllm/engines/qwen-coder,\
-      max_tokens_in_paged_kv_cache:2560,\
-      batch_scheduler_policy:guaranteed_no_evict,\
-      kv_cache_free_gpu_mem_fraction:0.9,\
-      max_num_sequences:1,\
-      executor_worker_path:/opt/tritonserver/backends/tensorrtllm/trtllmExecutorWorker
-  "
+  nvcr.io/nvidia/tritonserver:25.05-trtllm-python-py3 bash
 
-# 3. Create the required version subdirectory for each model:
-for model in preprocessing tensorrt_llm postprocessing ensemble tensorrt_llm_bls; do
-  mkdir -p $TRTLLM_HOME/model_repo/$model/1
-done
+# Inside the container:
+pip install -q huggingface_hub
+huggingface-cli download meta-llama/Meta-Llama-3.1-8B-Instruct \
+  --local-dir /workspace/trtllm/models/llama-3.1-8b --token $HF_TOKEN
+
+python3 /app/examples/llama/convert_checkpoint.py \
+  --model_dir /workspace/trtllm/models/llama-3.1-8b \
+  --output_dir /workspace/trtllm/engines/llama/ckpt \
+  --dtype float16
+
+trtllm-build \
+  --checkpoint_dir /workspace/trtllm/engines/llama/ckpt \
+  --output_dir /workspace/trtllm/engines/llama \
+  --gemm_plugin float16 \
+  --max_batch_size 4 \
+  --max_input_len 2048 \
+  --max_seq_len 4096
+exit
 ```
 
-**Why five models**: The pipeline separates concerns — `preprocessing` tokenizes input,
-`tensorrt_llm` runs the engine, `postprocessing` detokenizes output, `ensemble` chains
-them, and `tensorrt_llm_bls` provides the Business Logic Script entry point for the
-OpenAI frontend.
+### §4.4 Build the LLaVA 1.5 7B Vision Engine
 
-### §4.4 Verify the Model Repository
+> **Model selection**: LLaVA 1.5 7B (`llava-hf/llava-1.5-7b-hf`) is used because it is
+> confirmed `[x]` supported in TRT-LLM 0.19.0 C++ runtime for Triton serving. LLaVA-NeXT
+> (1.6) is `[ ]` **not supported** — its encoder output post-processing is incompatible
+> with the C++ runtime as of TRT-LLM 0.19.0 (see `research.md R4`).
+
+The vision pipeline has a different structure than the text pipelines: it uses
+`multimodal_encoders` (a Python backend) for the vision encoder and the standard
+`tensorrt_llm` backend for the LLaMA-7B language model backbone.
+
+```bash
+just build-llava
+```
+
+This builds both the vision encoder TRT engine and the LLM TRT engine inside a Triton
+25.05 container (~20–40 min, requires GPU). Output:
+
+```
+$TRTLLM_HOME/engines/llava/vision/    # TRT vision encoder engine
+$TRTLLM_HOME/engines/llava/llm/rank0.engine  # TRT LLM engine (LLaMA backbone)
+```
+
+### §4.5 Multi-Pipeline Model Repository Layout
+
+All three pipelines coexist in `$TRTLLM_HOME/model_repo/` with suffixed names:
+
+```text
+model_repo/
+├── preprocessing_qwen/         ← qwen-coder pipeline (text, code)
+├── tensorrt_llm_qwen/
+├── postprocessing_qwen/
+├── tensorrt_llm_bls_qwen/
+├── ensemble_qwen/              ← entry point for Code capability
+├── preprocessing_llama/        ← llama pipeline (general chat)
+├── tensorrt_llm_llama/
+├── postprocessing_llama/
+├── tensorrt_llm_bls_llama/
+├── ensemble_llama/             ← entry point for Chat capability
+├── multimodal_encoders/        ← vision pipeline (no suffix — only one vision pipeline)
+├── tensorrt_llm_vision/
+├── postprocessing_vision/
+└── ensemble_vision/            ← entry point for Caption capability
+```
+
+**Naming rule**: `{component}_{pipeline}` where `component` ∈
+`{preprocessing, tensorrt_llm, postprocessing, tensorrt_llm_bls, ensemble}`.
+`multimodal_encoders` keeps no suffix (only one vision pipeline in this POC).
+
+**Config cross-references** (must be updated when renaming):
+- `ensemble_{X}/config.pbtxt` → `ensemble_scheduling.model_name` refs use `_X` suffix
+- `tensorrt_llm_bls_{X}/config.pbtxt` → `tensorrt_llm_model_name` param uses `tensorrt_llm_{X}`
+- `tensorrt_llm_bls_{X}/1/model.py` → default arg values use suffixed names
+
+**VRAM budget** (FP16, one pipeline loaded at a time):
+
+| Pipeline | Approx VRAM | Headroom on 32 GB RTX 5090 |
+|---|---|---|
+| qwen (Code) | ≈14 GB | ≈18 GB |
+| llama (Chat) | ≈16 GB | ≈16 GB |
+| vision (Caption) | ≈15 GB | ≈17 GB |
+
+### §4.6 Set Up Pipeline Directories
+
+Run once per pipeline. The `setup-model-repo.sh` script handles renaming and config patching.
+
+```bash
+# First time only — rename existing bare dirs to *_qwen:
+just setup-model-repo qwen
+
+# After building llama engine — create *_llama dirs from inflight_batcher_llm template:
+just setup-model-repo llama
+
+# After building llava engine — create vision dirs from multimodal template:
+just setup-model-repo vision
+```
+
+**Verify**:
 
 ```bash
 ls $TRTLLM_HOME/model_repo/
-# Expected: ensemble/  postprocessing/  preprocessing/  tensorrt_llm/  tensorrt_llm_bls/
+# Expected: preprocessing_qwen  tensorrt_llm_qwen  postprocessing_qwen
+#           tensorrt_llm_bls_qwen  ensemble_qwen  (and _llama, _vision variants)
 
-# Each model dir must have a version subdirectory:
-ls $TRTLLM_HOME/model_repo/tensorrt_llm/
-# Expected: 1/  config.pbtxt
-
-# Confirm engine path is correct in the tensorrt_llm config:
-grep gpt_model_path $TRTLLM_HOME/model_repo/tensorrt_llm/config.pbtxt
-# Expected: string_value: "/workspace/trtllm/engines/qwen-coder"
+grep '^name:' $TRTLLM_HOME/model_repo/ensemble_qwen/config.pbtxt
+# Expected: name: "ensemble_qwen"
 ```
 
 **Verify §4 complete**:
-- [ ] Engine built inside Triton 25.05 container and owned by non-root user
-- [ ] `$TRTLLM_HOME/model_repo/` has all five pipeline model directories
-- [ ] Each model directory has a `1/` version subdirectory
-- [ ] `grep gpt_model_path` shows the correct engine path
+- [ ] Engine(s) built inside Triton 25.05 container
+- [ ] `$TRTLLM_HOME/model_repo/` contains all required pipeline directories with `_qwen` suffix
+- [ ] `grep '^name:' model_repo/ensemble_qwen/config.pbtxt` shows `ensemble_qwen`
+- [ ] Cross-references in `ensemble_qwen/config.pbtxt` use `preprocessing_qwen` etc.
 
 ---
 
@@ -539,17 +605,22 @@ just compose-up
 ```
 
 This runs `docker compose up -d` from `$TRTLLM_HOME`. The container starts detached with
-`restart: unless-stopped` — it will come back automatically after a host reboot (SC-003).
+`restart: unless-stopped` — it will come back automatically after a host reboot.
 
-The container runs `scripts/start-triton.sh`, which execs `python3 openai_frontend/main.py`.
-`main.py` starts an **embedded Triton** (via Python bindings), loads the model repository,
-and starts Uvicorn on port 9000. There is no separate `tritonserver` process — they are
-combined.
+The container runs `scripts/start-triton.sh`, which execs `python3 /triton_wrapper.py`.
+`triton_wrapper.py` monkey-patches `tritonserver.Server` to inject **EXPLICIT model-control
+mode** before delegating to the bundled `main.py`. `main.py` starts an **embedded Triton**
+(via Python bindings), then starts Uvicorn on port 9000. There is no separate
+`tritonserver` process — both are combined in a single Python process.
 
-> **Why embedded Triton**: the Triton 25.05 Python API (`tritonserver` bindings) embeds the
-> Triton runtime directly in the Python process. Starting a standalone `tritonserver` binary
-> alongside `main.py` causes GPU resource contention and `Failed to deserialize cuda engine`
-> failures. Always use `main.py` alone as the entrypoint.
+> **Explicit model-control mode**: In EXPLICIT mode, Triton starts with no models loaded.
+> You must explicitly load a pipeline before sending inference requests. This allows VRAM
+> to be reclaimed between pipeline switches without restarting the container.
+> `DEFAULT_MODEL` in `.env` / `compose.yaml` auto-loads one pipeline at startup.
+
+> **Why embedded Triton**: starting a standalone `tritonserver` binary alongside `main.py`
+> causes GPU resource contention and `Failed to deserialize cuda engine` failures.
+> Always use `triton_wrapper.py` → `main.py` as the entrypoint.
 
 ### §5.2 Watch Startup Logs
 
@@ -559,72 +630,121 @@ just compose-logs
 
 Watch for these key messages in order:
 
-1. `[start-triton] Starting OpenAI frontend` — startup script running
-2. `Loading model...` — embedded Triton is loading the TRT-LLM engine
-3. `Loaded engine size: XXXX MiB` — engine loaded into GPU memory
-4. `All models are ready` — all five pipeline models ready
+1. `[start-triton] Starting OpenAI frontend (via wrapper)` — startup script running
+2. `[triton_wrapper] Model-control mode: EXPLICIT` — wrapper injected explicit mode
+3. `[triton_wrapper] startup_models: ['ensemble_qwen', ...]` — if DEFAULT_MODEL is set
+4. `All models are ready` — startup models loaded (or server ready with no models)
 5. `Uvicorn running on http://0.0.0.0:9000` — OpenAI frontend accepting requests
 
-Full startup typically takes 20–60 seconds. Press `Ctrl-C` to stop following logs; the
-container continues running.
+Full startup typically takes 5–10 seconds with EXPLICIT mode and no models loaded
+(model load time is deferred to `just models-load`). Press `Ctrl-C` to stop following
+logs; the container continues running.
 
 **If Triton exits immediately**: run `just compose-logs` to see the error. Common causes:
 - Missing or invalid `config.pbtxt` (name mismatch, bad path)
 - Engine directory doesn't exist or is empty
-- `Failed to deserialize cuda engine` — engine was built with wrong TRT-LLM version
-  (see §4.2 — engine must be built inside the Triton container)
+- `Failed to deserialize cuda engine` — engine built with wrong TRT-LLM version
+  (must be built inside the Triton container, see §4.2)
 - Insufficient VRAM (another process holding GPU memory)
 
-See [docs/setup.md §6](#6--troubleshooting) for more.
+See §6 for more troubleshooting details.
 
-### §5.3 Health Check — Triton Native API
+### §5.3 Model-Control Workflow
+
+With EXPLICIT mode active, use `just models-*` recipes to manage VRAM:
 
 ```bash
-# Triton native readiness (should return HTTP 200):
+# Load a pipeline into GPU memory:
+just models-load qwen     # qwen-coder (Code capability, ~14 GB VRAM)
+just models-load llama    # Llama 3.1 8B (Chat capability, ~16 GB VRAM)
+just models-load vision   # LLaVA 1.5 7B (Caption capability, ~15 GB VRAM)
+
+# Unload a pipeline, freeing GPU memory:
+just models-unload qwen
+just models-unload llama
+just models-unload vision
+
+# Show all pipeline states:
+just models-status
+```
+
+`models-status` output example:
+```
+Model                          State
+─────────────────────────────  ──────────
+ensemble_llama                 READY
+ensemble_qwen                  UNAVAILABLE
+ensemble_vision                UNAVAILABLE
+...
+```
+
+**Auto-load at startup**: set `DEFAULT_MODEL=qwen` (or `llama`, `vision`) in
+`$TRTLLM_HOME/.env`. The wrapper will load that pipeline automatically after Triton
+becomes ready. Set `DEFAULT_MODEL=` (empty) to start with nothing loaded.
+
+**Switching pipelines** (without restarting the container):
+```bash
+just models-unload qwen    # free VRAM (~30 s)
+just models-load llama     # load llama (~30–60 s)
+```
+
+### §5.4 Health Check — Triton KServe API (port 8000)
+
+```bash
+# Triton readiness:
 curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8000/v2/health/ready
+# Expected: 200
 
-# List loaded models via native v2 API:
-curl -s -X POST http://localhost:8000/v2/repository/index | python -m json.tool
-# Expected: all five pipeline models listed with state READY
+# List all model states (EXPLICIT mode — most will be UNAVAILABLE until loaded):
+curl -s -X POST http://localhost:8000/v2/repository/index \
+  -H 'Content-Type: application/json' -d '{"ready": false}' | python3 -m json.tool
 ```
 
-### §5.4 Health Check — OpenAI-Compatible API (SC-002 prerequisite)
+### §5.5 Health Check — OpenAI-Compatible API (port 9000)
 
 ```bash
-# List models via OpenAI API (port 9000):
-curl -s http://localhost:9000/v1/models | python -m json.tool
-# Expected: {"object":"list","data":[{"id":"ensemble",...},{"id":"tensorrt_llm_bls",...},...]}
+# List available models:
+curl -s http://localhost:9000/v1/models | python3 -m json.tool
 ```
 
-### §5.5 Inference Smoke Test via curl
+### §5.6 Inference Smoke Test via curl
+
+Load a pipeline first, then send an inference request:
 
 ```bash
+just models-load qwen
+
+# Code request (routes to ensemble_qwen):
 curl -s http://localhost:9000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "ensemble",
+    "model": "ensemble_qwen",
     "messages": [{"role": "user", "content": "Write a one-line Python hello world."}],
     "max_tokens": 64
-  }' | python -m json.tool
+  }' | python3 -m json.tool
+
+# Chat request (routes to ensemble_llama — load llama first):
+just models-unload qwen && just models-load llama
+curl -s http://localhost:9000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model": "ensemble_llama", "messages": [{"role":"user","content":"Hello!"}]}' \
+  | python3 -m json.tool
 ```
 
-Expected: a JSON response with `choices[0].message.content` containing Python code.
-
-> **Model name**: Use `"ensemble"` (or `"tensorrt_llm_bls"`) in all requests — these are
-> the pipeline entry-point model names that Triton has loaded. Individual component models
-> (`preprocessing`, `tensorrt_llm`, `postprocessing`) are not valid inference targets.
+> **Model name in requests**: use the pipeline entry point — `ensemble_qwen`, `ensemble_llama`,
+> or `ensemble_vision`. Individual component models (`preprocessing_qwen`, etc.) are not valid
+> inference targets.
 
 **Verify §5 complete**:
-- [ ] `just compose-up` started the container without error
-- [ ] `just compose-logs` showed `All models are ready` then `Uvicorn running on ... 9000`
-- [ ] `curl localhost:8000/v2/health/ready` returned `200`
-- [ ] `curl localhost:9000/v1/models` returned model list (SC-002 prerequisite met)
-- [ ] `curl localhost:9000/v1/chat/completions` returned a coherent code response
-- [ ] Rebooted host and confirmed container restarted automatically (SC-003)
+- [ ] `just compose-up` started the container; logs show `Model-control mode: EXPLICIT`
+- [ ] `just models-load qwen` succeeded; `just models-status` shows `ensemble_qwen READY`
+- [ ] `just models-unload qwen` freed ≥20 GB VRAM (check `nvidia-smi`)
+- [ ] `curl localhost:9000/v1/chat/completions` returned a coherent response
+- [ ] Container restarted automatically after host reboot (SC-003)
 
 ---
 
-*Continue in §6 (Rust client + troubleshooting) — added during T018/T019.*
+*Continue in §6 (Troubleshooting).*
 
 ---
 
